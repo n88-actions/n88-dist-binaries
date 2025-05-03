@@ -1,0 +1,60 @@
+inputs:
+  files:
+    description: 'Paths representing files to upload (comma delimited).'
+    required: true
+  s3_alias:
+    description: 'The S3 bucket access path (e.g. https://my-bucket.tld).'
+    required: true
+  s3_endpoint:
+    description: 'The S3 endpoint url (e.g. https://s3.us-east-1.amazonaws.com).'
+    required: true
+  s3_bucket:
+    description: 'The S3 bucket name.'
+    required: true
+  s3_path_prefix:
+    description: 'The S3 path prefix which will be prepended to each file.'
+    required: true
+  github_token:
+    description: 'The Github token.'
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: 'composite'
+  steps:
+    - uses: n88-actions/n88-slug@v1
+    - run: |
+        echo "GITHUB_RELEASE_TAG=build-${GITHUB_BUILD_TAG}" >>"$GITHUB_ENV"
+        if [[ ! -d .github ]]; then mkdir .github; fi
+        echo "Build: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})" >>.github/release-body.md
+        echo "Commit: ${GITHUB_SHA}" >>.github/release-body.md
+        metadata_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        while IFS= read -rd, file; do
+          s3_path="${S3_PATH_PREFIX}/${GITHUB_BUILD_TAG}/$(basename "$file")"
+          metadata_sha256="$(shasum -a 256 -b -- "$file" | awk '{print $1}')"
+          echo "- $(basename "$file") - $(stat -c%s "$file" | numfmt --to=iec)" >>.github/release-body.md
+          echo "  \`\`\`" >>.github/release-body.md
+          echo "  ${S3_ALIAS}/${s3_path}" >>.github/release-body.md
+          echo "  \`\`\`" >>.github/release-body.md
+          aws --endpoint-url "${S3_ENDPOINT}" s3 cp \
+            --metadata "build-number=${GITHUB_RUN_NUMBER},commit=${GITHUB_SHA},date=${metadata_date},sha256=${metadata_sha256}" \
+            -- "$file" "s3://${S3_BUCKET}/${s3_path}"
+        done <<<"${FILES},"
+      shell: bash
+      env:
+        FILES: ${{ inputs.files }}
+        S3_ALIAS: ${{ inputs.s3_alias }}
+        S3_ENDPOINT: ${{ inputs.s3_endpoint }}
+        S3_BUCKET: ${{ inputs.s3_bucket }}
+        S3_PATH_PREFIX: ${{ inputs.s3_path_prefix }}
+    - run: |
+        git tag -f "$GITHUB_RELEASE_TAG" && git push -f origin "$GITHUB_RELEASE_TAG"
+      shell: bash
+    - uses: n88-actions/release-action@v1
+      with:
+        tag: ${{ env.GITHUB_RELEASE_TAG }}
+        prerelease: ${{ env.GITHUB_BUILD_TAG != 'main' }}
+        name: |
+          ${{ env.GITHUB_RELEASE_TAG }} #${{ github.run_number }}
+        bodyFile: .github/release-body.md
+        allowUpdates: true
+        token: ${{ inputs.github_token }}
